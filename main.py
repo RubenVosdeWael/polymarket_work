@@ -66,6 +66,29 @@ async def purchase_side(client, token_id, price, deadline_ts):
     await track_order(client, order_id, token_id, deadline_ts)
 
 
+# Keep strong references to background order tasks so they aren't garbage
+# collected mid-flight, and fire them without blocking the tick loop that's
+# watching prices — a blocked loop is a loop that can't see the next price
+# update (or check other markets' stop-losses) until the order call returns.
+_background_tasks = set()
+
+def fire_and_forget(coro):
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+
+async def enter_position(client, state, token_id, price, deadline_ts):
+    """Place the entry order in the background and correct state['shares']
+    once we know the real fill amount, without blocking the tick loop."""
+    _order_id, filled = await asyncio.to_thread(
+        place_orders.place_limit_order_sync, client, token_id, price, deadline_ts
+    )
+    if filled:
+        state['shares'] = filled
+
+
 async def main():
     slug = setup.get_slug_time()
 
@@ -93,41 +116,46 @@ async def main():
                         down_bid, down_ask = market[market_id][down_token]
                         state = entered[market_id]
 
-                        # Stop-loss is a ONE-SHOT trigger per position. Without the
-                        # `exited` guard this re-fires on every single tick that the
-                        # ask stays below the threshold, spamming a sell order every
-                        # ~1s even after the position is (or should be) already closed.
-                        if state['up'] and state['buy_price']:
+                        # Stop-loss is a ONE-SHOT trigger per position. `exited` is
+                        # set the instant we decide to sell (synchronously, before
+                        # any await/task), so no later tick can re-fire it and no
+                        # later tick can treat this market as flat and re-enter it
+                        # for the rest of this window.
+                        if state['up'] and state['buy_price'] and not state['exited']:
                             if up_ask is not None and up_ask <= state['buy_price'] - MAXIMAL_LOSS:
                                 print(f"stop Loss hit for up trade at {up_ask}")
-                                # state['exited'] = True
-                                sell_size = state['shares'] or place_orders.SHARES
-                                await asyncio.to_thread(place_orders.place_market_order_sync, client, up_token, "SELL", sell_size)
+                                state['exited'] = True
                                 state['up'] = False
-                        if state['down'] and state['buy_price']:
+                                sell_size = state['shares'] or place_orders.SHARES
+                                fire_and_forget(asyncio.to_thread(
+                                    place_orders.place_market_order_sync, client, up_token, "SELL", sell_size
+                                ))
+                        if state['down'] and state['buy_price'] and not state['exited']:
                             if down_ask is not None and down_ask <= state['buy_price'] - MAXIMAL_LOSS:
                                 print(f"stop Loss hit for down trade at {down_ask}")
-                                # state['exited'] = True
-                                sell_size = state['shares'] or place_orders.SHARES
-                                await asyncio.to_thread(place_orders.place_market_order_sync, client, down_token, "SELL", sell_size)
+                                state['exited'] = True
                                 state['down'] = False
-                                
+                                sell_size = state['shares'] or place_orders.SHARES
+                                fire_and_forget(asyncio.to_thread(
+                                    place_orders.place_market_order_sync, client, down_token, "SELL", sell_size
+                                ))
+
                         # if we are 20 seconds out
-                        if up_ask and down_ask and not (state['up'] or state['down']) and (market_time - curr_time) <= (BEFORE_ENTER * 1000):
+                        if up_ask and down_ask and not (state['up'] or state['down'] or state['exited']) and (market_time - curr_time) <= (BEFORE_ENTER * 1000):
                             #place a buy order if less than 89
                             # check which is larger
                             # here the up is higher
                             if up_ask > down_ask and up_ask < MAXIMAL_BID_PLUS_ONE:
-                                _order_id, filled = await asyncio.to_thread(place_orders.place_limit_order_sync, client, up_token, (up_ask + 0.01), (market_time / 1000))
                                 state['up'] = True
                                 state['buy_price'] = up_ask
-                                state['shares'] = filled or place_orders.SHARES
+                                state['shares'] = place_orders.SHARES
+                                fire_and_forget(enter_position(client, state, up_token, (up_ask + 0.01), (market_time / 1000)))
                                 print(f"entered an up trade at price: {up_ask}\nWith up_ask : {up_ask} and down_ask : {down_ask}")
                             elif down_ask > up_ask and down_ask < MAXIMAL_BID_PLUS_ONE:
-                                _order_id, filled = await asyncio.to_thread(place_orders.place_limit_order_sync, client, down_token, (down_ask + 0.01), (market_time / 1000))
                                 state['down'] = True
                                 state['buy_price'] = down_ask
-                                state['shares'] = filled or place_orders.SHARES
+                                state['shares'] = place_orders.SHARES
+                                fire_and_forget(enter_position(client, state, down_token, (down_ask + 0.01), (market_time / 1000)))
                                 print(f"entered a down trade at price: {down_ask}\nWith up_ask : {up_ask} and down_ask : {down_ask}")
 
 

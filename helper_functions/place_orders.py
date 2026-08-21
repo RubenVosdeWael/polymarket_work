@@ -103,7 +103,15 @@ def place_market_order_sync(client, token_id, side="SELL", amount=None):
                 token_id=token_id,
                 side=side,
                 amount=amount,
-                order_type=OrderType.FOK
+                # FAK (fill-and-kill / IOC) instead of FOK: on a fast-crashing
+                # book there often isn't enough resting size to fill the full
+                # amount in one shot. FOK rejects the whole order in that case
+                # (see the repeated "couldn't be fully filled" retries in the
+                # logs), burning time on retries while price keeps falling.
+                # FAK takes whatever's available immediately and kills the
+                # rest instead of erroring out. Verify OrderType.FAK exists in
+                # your py_clob_client_v2 build before relying on this.
+                order_type=OrderType.FAK
             )
             resp = client.create_and_post_market_order(
                     order_args=order_args
