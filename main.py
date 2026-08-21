@@ -8,7 +8,7 @@ BEFORE_ENTER = 20           # How many seconds before we want to enter
 MAXIMAL_LOSS = 0.10         # how much we are willing to lose per share max
 MAXIMAL_BID_PLUS_ONE = 0.89 # how much I am willing to bet to stay positive 50/50 at 89 i make 1 cent a share if i win 50/50
 SECONDS_BEFORE = 5
-ENTRY_PRICE = .80
+ENTRY_PRICE = .72
 
 
 async def main():
@@ -44,15 +44,35 @@ async def main():
                             #place a buy order if we hit 80 cents
                             # check which is larger
                             # here the up is higher
-                            _order_id, filled = await asyncio.to_thread(place_orders.place_limit_order_sync, client=client, token_id=up_token, price=ENTRY_PRICE, deadline_ts=(market_time / 1000))
+                            order_id_up, filled = await asyncio.to_thread(place_orders.place_limit_order_sync, client=client, token_id=up_token, price=ENTRY_PRICE, deadline_ts=(market_time / 1000))
                             state['up'] = True
-                            await asyncio.sleep(0.1)
-                            await asyncio.to_thread(place_orders.place_limit_order_sync, client=client, token_id=up_token, price=(ENTRY_PRICE + 0.10), deadline_ts=(market_time / 1000), side="SELL")
+                            while True:
+                                try:
+                                    status = await momentum_following_logic.get_order_status(client=client, order_id=order_id_up, which_order="Up Side", shares_to_buy=5)
+                                except Exception as e:
+                                    print(f"Error checking UP BUY status: {e}")
+                                    status = None
+                
+                                if status == "FILLED":
+                                    break
+                                await asyncio.sleep(0.1)
+                                
+                            await asyncio.to_thread(place_orders.place_limit_order_sync, client=client, token_id=up_token, price=(ENTRY_PRICE + 0.05), deadline_ts=(market_time / 1000), side="SELL")
                         elif up_ask and down_ask and not state['down'] and down_ask >= (ENTRY_PRICE - 0.02):
-                            _order_id, filled = await asyncio.to_thread(place_orders.place_limit_order_sync, client=client, token_id=down_token, price=ENTRY_PRICE, deadline_ts=(market_time / 1000))
+                            order_id_down, filled = await asyncio.to_thread(place_orders.place_limit_order_sync, client=client, token_id=down_token, price=ENTRY_PRICE, deadline_ts=(market_time / 1000))
                             state['down'] = True
-                            await asyncio.sleep(0.1)
-                            await asyncio.to_thread(place_orders.place_limit_order_sync, client=client, token_id=down_token, price=(ENTRY_PRICE + 0.10), deadline_ts=(market_time / 1000), side="SELL")
+                            while True:
+                                try:
+                                    status = await momentum_following_logic.get_order_status(client=client, order_id=order_id_down, which_order="Down Side", shares_to_buy=5)
+                                except Exception as e:
+                                    print(f"Error checking UP BUY status: {e}")
+                                    status = None
+                
+                                if status == "FILLED":
+                                    break
+                                await asyncio.sleep(0.1)
+
+                            await asyncio.to_thread(place_orders.place_limit_order_sync, client=client, token_id=down_token, price=(ENTRY_PRICE + 0.05), deadline_ts=(market_time / 1000), side="SELL")
 
                         
 

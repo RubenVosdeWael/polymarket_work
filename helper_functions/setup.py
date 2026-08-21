@@ -7,7 +7,7 @@ HOST       = "https://clob.polymarket.com"
 CHAIN_ID   = 137
 
 markets = [
-    # 'eth-updown-5m-',
+    'eth-updown-5m-',
     'btc-updown-5m-',
     # 'sol-updown-5m-',
     # 'xrp-updown-5m-',

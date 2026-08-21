@@ -7,29 +7,51 @@ BUY_PRICE = 0.55
 SELL_PRICE = BUY_PRICE + 0.10
 
 
-async def get_order_status(client, order_id, which_order):
+async def get_order_status(client, order_id, which_order, shares_to_buy):
     """
-    Replace this with however you're currently retrieving
-    order status from the Polymarket client.
-
-    Should return "FILLED" or "ON MARKET" (or None if we can't tell / no order exists).
+    Poll a single order's status.
+ 
+    shares_to_buy: how many shares this order needs to have matched before
+    we treat it as done. The CLOB reports "MATCHED" the moment ANY amount
+    matches — including a partial fill — so checking status alone isn't
+    enough. We only report "FILLED" once size_matched has actually reached
+    shares_to_buy; a partial fill still returns "ON MARKET" so we keep
+    waiting for the rest (e.g. before placing a SELL, since we can't sell
+    shares we don't fully hold yet).
+ 
+    Returns "FILLED", "ON MARKET", "CANCELLED", or None if we can't tell.
     """
     if order_id is None:
         return None
-
+ 
     try:
         order = await asyncio.to_thread(client.get_order, order_id)
     except Exception as e:
         print(json.dumps({"status": "error", "stage": "poll", "order_id": order_id, "errorMsg": str(e)}))
         return None
-
+ 
     if order:
         status = order.get("status") if isinstance(order, dict) else None
-        print(json.dumps({"status": "tracking", "order_id": order_id, "Which Order": which_order, "order_status": status}))
-        if status in ("FILLED", "MATCHED", "CANCELLED"):
+ 
+        try:
+            size_matched = float(order.get("size_matched", 0) or 0)
+        except (TypeError, ValueError):
+            size_matched = 0.0
+ 
+        print(json.dumps({
+            "status": "tracking", "order_id": order_id, "Which Order": which_order,
+            "order_status": status, "size_matched": size_matched, "shares_to_buy": shares_to_buy,
+        }))
+ 
+        if status == "CANCELLED":
+            # No more fills are coming, however much matched before the cancel.
+            return "CANCELLED"
+ 
+        if status in ("FILLED", "MATCHED") and size_matched >= shares_to_buy:
             return "FILLED"
-
+ 
     return "ON MARKET"
+
 
 
 async def cancel_order(client, order_id):
