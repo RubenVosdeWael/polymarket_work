@@ -1,9 +1,11 @@
 import json, re, traceback, time
-from py_clob_client_v2.clob_types import OrderArgs, OrderType
+from py_clob_client_v2.clob_types import OrderArgs, OrderType, OrderPayload
 from py_clob_client_v2 import MarketOrderArgs
 from datetime import datetime, timezone
 
 RETRY_DELAY      = 1      # seconds to wait between failed placement attempts
+SETTLEMENT_RETRY_DELAY = 0.5   # a MATCHED order's shares can take a moment to settle on-chain
+MAX_SETTLEMENT_RETRIES = 30    # hard cap so we never spin forever if deadline_ts is missing
 SHARES = 5      # Polymarket's minimum order size, in shares — independent of price/dollars
 
 # Polymarket's "not enough balance" error embeds the real numbers, e.g.:
@@ -59,8 +61,29 @@ def place_limit_order_sync(client, token_id, price, deadline_ts=None, side="BUY"
                 if m:
                     avail = float(m.group(1)) / 1_000_000
                     if avail <= 0:
-                        print(json.dumps({"status": "no_balance", "token_id": token_id}))
-                        return None, 0.0
+                        # A MATCHED buy doesn't mean the shares are in your wallet yet —
+                        # settlement happens on-chain a moment after the match. If we hit
+                        # zero balance here it's very likely that lag, not a real "you
+                        # never bought anything" situation, so retry briefly instead of
+                        # giving up on the very first attempt.
+                        deadline_hit = (
+                            deadline_ts is not None
+                            and datetime.now(timezone.utc).timestamp() >= deadline_ts
+                        )
+                        if deadline_hit or attempt >= MAX_SETTLEMENT_RETRIES:
+                            print(json.dumps({
+                                "status": "no_balance", "token_id": token_id,
+                                "attempt": attempt,
+                                "reason": "deadline passed" if deadline_hit else "max retries",
+                            }))
+                            return None, 0.0
+
+                        print(json.dumps({
+                            "status": "awaiting_settlement", "token_id": token_id,
+                            "attempt": attempt,
+                        }))
+                        time.sleep(SETTLEMENT_RETRY_DELAY)
+                        continue  # retry — balance likely just needs a moment to settle
                     if avail != size:
                         print(json.dumps({
                             "status": "resizing_order", "token_id": token_id,
@@ -86,6 +109,22 @@ def place_limit_order_sync(client, token_id, price, deadline_ts=None, side="BUY"
                 return None, 0.0
 
             time.sleep(RETRY_DELAY)
+
+
+def cancel_order_sync(client, order_id):
+    """Cancel a resting order. Runs in a worker thread.
+
+    NOTE: ClobClient has no `.cancel()` method — the real API is
+    `client.cancel_order(OrderPayload(orderID=...))`. Calling `.cancel()`
+    directly raises AttributeError and silently leaves the order resting.
+    """
+    payload = OrderPayload(orderID=order_id)
+    resp = client.cancel_order(payload)
+    print(json.dumps({
+        "status": "cancelled", "order_id": order_id,
+        "resp": resp if isinstance(resp, dict) else str(resp),
+    }))
+    return resp
 
 
 def place_market_order_sync(client, token_id, side="SELL", amount=None):

@@ -1,69 +1,14 @@
-import requests, json, os, time, math, asyncio, traceback
-
-from helper_functions import setup, websocket_work, place_orders
+import json, asyncio
+from helper_functions import setup, websocket_work, place_orders, momentum_following_logic
 from datetime import datetime, timezone
 
-POLL_INTERVAL    = 2      # seconds between order-status checks
+
 MARKET_DURATION  = 300    # 5-minute markets; unfilled legs get cancelled when the window closes
 BEFORE_ENTER = 20           # How many seconds before we want to enter
 MAXIMAL_LOSS = 0.10         # how much we are willing to lose per share max
 MAXIMAL_BID_PLUS_ONE = 0.89 # how much I am willing to bet to stay positive 50/50 at 89 i make 1 cent a share if i win 50/50
-
-
-
-
-def get_order_status_sync(client, order_id):
-    try:
-        return client.get_order(order_id)
-    except Exception as e:
-        print(json.dumps({"status": "error", "stage": "poll", "order_id": order_id, "errorMsg": str(e)}))
-        return None
-
-
-def cancel_order_sync(client, order_id):
-    try:
-        client.cancel(order_id)
-        print(json.dumps({"status": "cancelled", "order_id": order_id}))
-    except Exception as e:
-        print(json.dumps({"status": "error", "stage": "cancel", "order_id": order_id, "errorMsg": str(e)}))
-
-
-async def get_top_of_book_bid(token):
-    url = f'https://clob.polymarket.com/book?token_id={token}'
-
-    response = requests.get(url).json()
-
-    return float(response['bids'][-1]['price'])
-
-
-
-
-async def track_order(client, order_id, token_id, deadline_ts):
-    """Poll a resting order until it fills/cancels, or cancel it once the market window closes."""
-    if order_id is None:
-        return
-
-    while True:
-        now   = datetime.now(timezone.utc).timestamp()
-        order = await asyncio.to_thread(get_order_status_sync, client, order_id)
-
-        if order:
-            status = order.get("status") if isinstance(order, dict) else None
-            print(json.dumps({"status": "tracking", "order_id": order_id, "token_id": token_id, "order_status": status}))
-            if status in ("FILLED", "MATCHED", "CANCELLED"):
-                break
-
-        if now >= deadline_ts:
-            # market window is closing — don't let a stale limit order carry into the next one
-            await asyncio.to_thread(cancel_order_sync, client, order_id)
-            break
-
-        await asyncio.sleep(POLL_INTERVAL)
-
-
-async def purchase_side(client, token_id, price, deadline_ts):
-    order_id, _filled = await asyncio.to_thread(place_orders.place_limit_order_sync, client, token_id, price, deadline_ts)
-    await track_order(client, order_id, token_id, deadline_ts)
+SECONDS_BEFORE = 5
+ENTRY_PRICE = .80
 
 
 async def main():
@@ -74,7 +19,7 @@ async def main():
     while True:
         all_ids = setup.get_clob_ids(str(slug))
         entered = {
-            market: {"up": False, "down": False, "buy_price": None, "shares": None, "exited": False}
+            market: {"up": False, "down": False, "buy_price": None, "shares": None, "exited": False, "sell_price": None}
             for market in all_ids
         }
 
@@ -93,47 +38,22 @@ async def main():
                         down_bid, down_ask = market[market_id][down_token]
                         state = entered[market_id]
 
-                        # Stop-loss is a ONE-SHOT trigger per position. Without the
-                        # `exited` guard this re-fires on every single tick that the
-                        # ask stays below the threshold, spamming a sell order every
-                        # ~1s even after the position is (or should be) already closed.
-                        if state['up'] and state['buy_price']:
-                            if up_ask is not None and up_ask <= state['buy_price'] - MAXIMAL_LOSS:
-                                print(f"stop Loss hit for up trade at {up_ask}")
-                                # state['exited'] = True
-                                sell_size = state['shares'] or place_orders.SHARES
-                                await asyncio.to_thread(place_orders.place_market_order_sync, client, up_token, "SELL", sell_size)
-                                state['up'] = False
-                        if state['down'] and state['buy_price']:
-                            if down_ask is not None and down_ask <= state['buy_price'] - MAXIMAL_LOSS:
-                                print(f"stop Loss hit for down trade at {down_ask}")
-                                # state['exited'] = True
-                                sell_size = state['shares'] or place_orders.SHARES
-                                await asyncio.to_thread(place_orders.place_market_order_sync, client, down_token, "SELL", sell_size)
-                                state['down'] = False
-                                
-                        # if we are 20 seconds out
-                        if up_ask and down_ask and not (state['up'] or state['down']) and (market_time - curr_time) <= (BEFORE_ENTER * 1000):
-                            #place a buy order if less than 89
+  
+                        # if we hit our target entry price
+                        if up_ask and down_ask and not state['up'] and up_ask >= (ENTRY_PRICE - 0.02):
+                            #place a buy order if we hit 80 cents
                             # check which is larger
                             # here the up is higher
-                            if up_ask > down_ask and up_ask < MAXIMAL_BID_PLUS_ONE:
-                                _order_id, filled = await asyncio.to_thread(place_orders.place_limit_order_sync, client, up_token, (up_ask + 0.01), (market_time / 1000))
-                                state['up'] = True
-                                state['buy_price'] = up_ask
-                                state['shares'] = filled or place_orders.SHARES
-                                print(f"entered an up trade at price: {up_ask}\nWith up_ask : {up_ask} and down_ask : {down_ask}")
-                            elif down_ask > up_ask and down_ask < MAXIMAL_BID_PLUS_ONE:
-                                _order_id, filled = await asyncio.to_thread(place_orders.place_limit_order_sync, client, down_token, (down_ask + 0.01), (market_time / 1000))
-                                state['down'] = True
-                                state['buy_price'] = down_ask
-                                state['shares'] = filled or place_orders.SHARES
-                                print(f"entered a down trade at price: {down_ask}\nWith up_ask : {up_ask} and down_ask : {down_ask}")
+                            _order_id, filled = await asyncio.to_thread(place_orders.place_limit_order_sync, client=client, token_id=up_token, price=ENTRY_PRICE, deadline_ts=(market_time / 1000))
+                            state['up'] = True
+                            await asyncio.sleep(0.1)
+                            await asyncio.to_thread(place_orders.place_limit_order_sync, client=client, token_id=up_token, price=(ENTRY_PRICE + 0.10), deadline_ts=(market_time / 1000), side="SELL")
+                        elif up_ask and down_ask and not state['down'] and down_ask >= (ENTRY_PRICE - 0.02):
+                            _order_id, filled = await asyncio.to_thread(place_orders.place_limit_order_sync, client=client, token_id=down_token, price=ENTRY_PRICE, deadline_ts=(market_time / 1000))
+                            state['down'] = True
+                            await asyncio.sleep(0.1)
+                            await asyncio.to_thread(place_orders.place_limit_order_sync, client=client, token_id=down_token, price=(ENTRY_PRICE + 0.10), deadline_ts=(market_time / 1000), side="SELL")
 
-
-                            # set the limit stop loss (which i'll have to build)
-                            # take the other side? idk
-                        
                         
 
                         # here we can go to the next market
@@ -150,6 +70,8 @@ async def main():
                 
 
         slug = slug + MARKET_DURATION
+        
+                
 
 
 if __name__ == "__main__":

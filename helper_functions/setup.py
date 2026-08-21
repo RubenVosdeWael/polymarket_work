@@ -7,11 +7,11 @@ HOST       = "https://clob.polymarket.com"
 CHAIN_ID   = 137
 
 markets = [
-    'eth-updown-5m-',
+    # 'eth-updown-5m-',
     'btc-updown-5m-',
-    'sol-updown-5m-',
-    'xrp-updown-5m-',
-    'doge-updown-5m-'
+    # 'sol-updown-5m-',
+    # 'xrp-updown-5m-',
+    # 'doge-updown-5m-'
 ]
 
 # for clob token id index 0 is up token and index 1 is down token
