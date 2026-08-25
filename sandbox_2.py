@@ -1,4 +1,6 @@
 import requests, json, time
+from datetime import datetime, timezone
+from helper_functions import setup
 
 # url = "https://gamma-api.polymarket.com/events/slug/sol-updown-5m-1787181300"
 
@@ -15,5 +17,7 @@ import requests, json, time
 
 now = int(time.time())
 
-print(now - (now % 300))
+print(now)
+print(setup.get_slug_time())
 
+print(datetime.now(timezone.utc))
