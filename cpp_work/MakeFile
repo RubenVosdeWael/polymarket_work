@@ -1,0 +1,52 @@
+# Builds the standalone Polymarket websocket feed (polymarket_feed).
+#
+# Dependencies you need installed before this will compile:
+#   - Boost (Beast + Asio) headers        -> apt: libboost-all-dev
+#   - OpenSSL dev headers + libs          -> apt: libssl-dev
+#   - nlohmann/json (header-only)         -> apt: nlohmann-json3-dev
+#                                             (or drop json.hpp under
+#                                              third_party/nlohmann/json.hpp
+#                                              and set NLOHMANN_INCLUDE below)
+#
+# On Windows: this Makefile assumes a g++-based toolchain (MSYS2/MinGW-w64,
+# or WSL2 running Linux). It will not work directly with MSVC's cl.exe —
+# either build under WSL2, or set up an MSYS2 MinGW64 shell with
+# `pacman -S mingw-w64-x86_64-boost mingw-w64-x86_64-openssl
+#  mingw-w64-x86_64-nlohmann-json mingw-w64-x86_64-gcc` and run `make` there.
+#
+# Usage:
+#   make            # build ./polymarket_feed
+#   make run        # build and run it
+#   make clean
+
+CXX      := g++
+CXXSTD   := -std=c++17
+CXXFLAGS := $(CXXSTD) -O2 -Wall -Wextra -pthread
+
+# Uncomment and point this at json.hpp if it's not installed system-wide.
+# NLOHMANN_INCLUDE := -Ithird_party/nlohmann
+NLOHMANN_INCLUDE :=
+
+INCLUDES := $(NLOHMANN_INCLUDE)
+LDFLAGS  := -lssl -lcrypto -lboost_system -pthread
+
+TARGET  := polymarket_feed
+SOURCES := main.cpp ws_client.cpp
+OBJECTS := $(SOURCES:.cpp=.o)
+HEADERS := ws_client.h config.h
+
+.PHONY: all run clean
+
+all: $(TARGET)
+
+$(TARGET): $(OBJECTS)
+	$(CXX) $(CXXFLAGS) $(OBJECTS) -o $@ $(LDFLAGS)
+
+%.o: %.cpp $(HEADERS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+run: all
+	./$(TARGET)
+
+clean:
+	rm -f $(OBJECTS) $(TARGET)
